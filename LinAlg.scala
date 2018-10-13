@@ -1,11 +1,14 @@
 import scala.lms.common._
+import java.io._
 
-trait LinearAlgebra extends Base with PrimitiveOps
+trait VectorOps extends Base with PrimitiveOps
 					with NumericOps with LiftNumeric
 					with FractionalOps with TupleOps
           with ArrayOps {
 	// Interface
 	type Vector
+
+  implicit def repVectorToVectorOps(v: Rep[Vector]) = new VectorOpsCls(v)
 
 	// Base trait contains Rep[T], an abstract type member
 	// And unit[T](x: T): Rep[T], used to lift values
@@ -21,22 +24,24 @@ trait LinearAlgebra extends Base with PrimitiveOps
 		vector_add(v1, v2)
 	def vector_add(v1: Rep[Vector], v2: Rep[Vector]): Rep[Vector]
 
-  def new_vector(len: Int, xs: Rep[Double]*): Rep[Vector]
+  def vector_apply(v: Rep[Vector], i: Rep[Int]): Rep[Double]
 
-	implicit def vec(s: (Seq[Double], Int)): Rep[Vector]
-
+  class VectorOpsCls(v: Rep[Vector]) {
+    def apply(n: Rep[Int]) = vector_apply(v, n)
+  }
+  def new_vector(xs: Rep[Double]*): Rep[Vector]
 }
 
 
-trait LinearAlgebraExp extends LinearAlgebra with BaseExp
+
+trait VectorOpsExp extends VectorOps with BaseExp
 	  				   with SeqOpsExp with NumericOpsExp with PrimitiveOpsExp
 	  				   with FractionalOpsExp with TupleOpsExp
                with ArrayOpsExp {
 	// Implementation: I.e. how to generate an IR reperesentation
-	override type Vector = (Seq[Double], Int)
 
-	override implicit def vec(vec_with_length: (Seq[Double], Int)): Rep[Vector] =
-    unit(vec_with_length)
+  // TODO: Why is this still here. Remove
+  override type Vector = (Seq[Double], Int)
 
 	case class VectorScale(v: Exp[Vector], k: Exp[Double])
 		extends Def[Vector]
@@ -50,6 +55,9 @@ trait LinearAlgebraExp extends LinearAlgebra with BaseExp
   case class NewVector(l: Int, xs: Seq[Exp[Double]])
     extends Def[Vector]
 
+  case class VectorApply(v: Rep[Vector], i: Rep[Int])
+    extends Def[Double]
+
 	override def vector_scale(v: Exp[Vector], k: Exp[Double]) =
 		toAtom(VectorScale(v, k))
 
@@ -59,11 +67,14 @@ trait LinearAlgebraExp extends LinearAlgebra with BaseExp
 	override def vector_div(v: Exp[Vector], k: Exp[Double]) =
 		toAtom(VectorDiv(v, k))
 
-  override def new_vector(l: Int, xs: Exp[Double]*) =
-    toAtom(NewVector(l, xs))
+  override def new_vector(xs: Exp[Double]*) =
+    toAtom(NewVector(xs.length, xs))
+
+  override def vector_apply(v: Rep[Vector], i: Rep[Int]) =
+    toAtom(VectorApply(v, i))
 }
 
-trait LinearAlgebraExpOpt extends LinearAlgebraExp {
+trait VectorOpsExpOpt extends VectorOpsExp {
 	override def vector_scale(v: Exp[Vector], k: Exp[Double]) =
 		// TODO: Rewrite to use Numeric instead of Double
 		(v, k) match {
@@ -82,8 +93,8 @@ trait LinearAlgebraExpOpt extends LinearAlgebraExp {
 		}
 }
 
-trait ScalaGenLinearAlgebra extends ScalaGenBase {
-	val IR: LinearAlgebraExpOpt
+trait ScalaGenVectorOps extends ScalaGenBase {
+	val IR: VectorOpsExpOpt
 	import IR._
 
 	override def emitNode(sym: Sym[Any],
@@ -104,12 +115,11 @@ trait ScalaGenLinearAlgebra extends ScalaGenBase {
 }
 
 
-trait CGenLinearAlgebra extends CGenBase
-    with CGenNumericOps with CGenBooleanOps
-    with CGenTupleOps with CGenFractionalOps
-    with CGenVariables with CGenArrayOps
-    with CGenSeqOps {
-	val IR: LinearAlgebraExpOpt
+trait CGenVectorOps extends CGenTupleOps
+  with CGenPrimitiveOps {  // TODO: Why do we need CGenTupleOps
+  // To maintain C immutability, we malloc new vectors for every operation.
+  // This leaks memory everywhere.
+	val IR: VectorOpsExpOpt
 	import IR._
 
   private def initialize_empty_vector(sym: Sym[Any], vec: Exp[Vector]): Unit = {
@@ -125,14 +135,14 @@ $sym->_2 = $vec->_2;
     node match {
     case NewVector(k, xs) => {
       emitValDef(sym, "malloc(sizeof(Tuple2SeqDoubleInt))");
-
-      // Problem: stack allocation here!
-      stream.println(
-        quote(sym) + "->_2 = " + k.toString + ";\n" +
-        quote(sym) + "->_1 = malloc(sizeof(double) * " + k.toString + ");"
+      stream.println(f"""
+${quote(sym)}->_2 = $k;
+${quote(sym)}->_1 = malloc(sizeof(double) * $k);"""
       )
       for (i <- 0 to k-1) {
-        stream.println(quote(sym) + "->_1[" + i.toString + "] = " + quote(xs(i))) + ";"
+        stream.println(f"""
+${quote(sym)}->_1[$i] = ${quote(xs(i))};"""
+)
       }
 
     }
@@ -141,18 +151,17 @@ $sym->_2 = $vec->_2;
       initialize_empty_vector(sym, v)
 			stream.println(src"""
 for (int i = 0; i < $v->_2; i++) {
-		$sym->_1[i] =  $v->_1[i] * $k);
+		$sym->_1[i] =  $v->_1[i] * $k;
 }
-		    """
-		  )
+		    """)
 		}
 		case VectorDiv(v, k) => {
-			stream.println(
-				"int vec_len = " + quote(v) + "->_2\n" +
-		   	  		  "for (int i = 0; i < vec_len; i++) {\n" +
-		   				         quote(v) + "->_1[i] /=" + quote(k) + ";\n" +
-		   			"}"
-		   	)
+      initialize_empty_vector(sym, v)
+      stream.println(src"""
+for (int i = 0; i < $v->_2; i++) {
+  $sym->_1[i] = $v->_1[i] / $k;
+}
+      """)
 		}
 
 		case VectorAdd(v1, v2) => {
@@ -160,11 +169,14 @@ for (int i = 0; i < $v->_2; i++) {
 			//
       initialize_empty_vector(sym, v2);
 			stream.println(src"""
-for (int i = 0; i < $v2->_2[i]; i++) {
+for (int i = 0; i < $v2->_2; i++) {
    $sym->_1[i] = $v1->_1[i] + $v2->_1[i];
 }
-			     """
-			  )
+			     """)
+     }
+
+     case VectorApply(v, i) => {
+       emitValDef(sym, src"$v->_1[$i]")
      }
 
     case _ => {
@@ -179,10 +191,12 @@ for (int i = 0; i < $v2->_2[i]; i++) {
           typedef struct _Tuple2SeqDoubleInt {
             double *_1;
             int _2;
-          } Tuple2SeqDoubleInt
+          } Tuple2SeqDoubleInt;
+
+          double F(Tuple2SeqDoubleInt *x0);
 
           int main(int argc, char *argv[]) {
-            Tuple2SeqDoubleInt *v = malloc(sizeof(Tuple2SeqDoubleInt))
+            Tuple2SeqDoubleInt *v = malloc(sizeof(Tuple2SeqDoubleInt));
             v->_2 = 3;
             v->_1 = malloc(sizeof(double) * 3);
             v->_1[0] = 1.0; v->_1[1] = 2.0; v->_1[2] = 4.0;
@@ -195,25 +209,22 @@ for (int i = 0; i < $v2->_2[i]; i++) {
   }
 }
 
-trait Prog extends LinearAlgebra {
-	def f(v1: Rep[Vector]): Rep[Vector] = {
-    val c1 = new_vector(3, 0.0, 1.0, 0.0)
-    val c2 = new_vector(3, 2.0, 3.0, 4.0)
-		(v1 + c1 * 5.0) + c2
+trait Prog extends VectorOps {
+	def f(v1: Rep[Vector]): Rep[Double] = {
+		val v = (v1 + new_vector(0.0, 1.0 * 4.0, 0.0) * 5.0) + new_vector(2.0, 3.0, 4.0)
+    v(1) + v(2) + v(3)
   }
 }
 
 object LinAlg {
 	def main(args: Array[String]): Unit = {
-		println("Hello LMS!")
-
-		val prog = new Prog with LinearAlgebraExpOpt with EffectExp {
+		val prog = new Prog with VectorOpsExpOpt with EffectExp {
 			self =>
-			 val codegen = new CGenLinearAlgebra {
+			 val codegen = new CGenVectorOps {
 				val IR: self.type = self
 			}
-			codegen.emitSource(f, "F", new java.io.PrintWriter(System.out))
+      // Hack to get a pointer
+			codegen.emitSource(f, "F", new java.io.PrintWriter(new File("out.c")))
 		}
-		// TODO: What is the 'EffectExp'
 	}
 }
