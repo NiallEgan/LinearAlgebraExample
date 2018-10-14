@@ -8,6 +8,7 @@ trait VectorOps extends Base with PrimitiveOps
 	// Interface
 	type Vector
 
+
   implicit def repVectorToVectorOps(v: Rep[Vector]) = new VectorOpsCls(v)
 
 	// Base trait contains Rep[T], an abstract type member
@@ -34,7 +35,7 @@ trait VectorOps extends Base with PrimitiveOps
 
 
 
-trait VectorOpsExp extends VectorOps with BaseExp
+trait VectorOpsExp extends VectorOps with BaseExp with EffectExp
 	  				   with SeqOpsExp with NumericOpsExp with PrimitiveOpsExp
 	  				   with FractionalOpsExp with TupleOpsExp
                with ArrayOpsExp {
@@ -42,6 +43,8 @@ trait VectorOpsExp extends VectorOps with BaseExp
 
   // TODO: Why is this still here. Remove
   override type Vector = (Seq[Double], Int)
+
+  //implicit def vectorTyp: Typ[Vector] = manifestTyp this doesn't work...
 
 	case class VectorScale(v: Exp[Vector], k: Exp[Double])
 		extends Def[Vector]
@@ -82,8 +85,8 @@ trait VectorOpsExpOpt extends VectorOpsExp {
 			case _ => super.vector_scale(v, k)
 		}
 
-	private def is_zeroes(vec_with_length: Vector): Boolean =
-		vec_with_length._1.forall(_ == 0.0)
+	private def is_zeroes(vec_with_length: Vector): Boolean = false
+	//vec_with_length._1.forall(_ == 0.0)
 
 	override def vector_add(v1: Exp[Vector], v2: Exp[Vector]) =
 		(v1, v2) match {
@@ -91,27 +94,6 @@ trait VectorOpsExpOpt extends VectorOpsExp {
 			case (Const(v1), v2) if is_zeroes(v1) => v2
 			case _ => super.vector_add(v1, v2)
 		}
-}
-
-trait ScalaGenVectorOps extends ScalaGenBase {
-	val IR: VectorOpsExpOpt
-	import IR._
-
-	override def emitNode(sym: Sym[Any],
-						  node: Def[Any]): Unit = node match {
-		case VectorScale(v, k) => {
-			emitValDef(sym, src"$v._1.map(_ * $k)")
-		}
-
-		case VectorAdd(v1, v2) => {
-			emitValDef(sym, src"($v1._1, $v2._1).zipped.map(_ + _)")
-		}
-
-		case VectorDiv(v, k) => {
-			emitValDef(sym, src"$v._1.map(_ / $k)")
-		}
-		case _ => super.emitNode(sym, node)
-	}
 }
 
 
@@ -210,9 +192,10 @@ for (int i = 0; i < $v2->_2; i++) {
 }
 
 trait Prog extends VectorOps {
-	def f(v1: Rep[Vector]): Rep[Double] = {
+	def f(v1: Rep[Vector]): Rep[Vector] = {
 		val v = (v1 + new_vector(0.0, 1.0 * 4.0, 0.0) * 5.0) + new_vector(2.0, 3.0, 4.0)
-    v(1) + v(2) + v(3)
+    //v(1) + v(2) + v(3)
+    v
   }
 }
 
@@ -224,7 +207,7 @@ object LinAlg {
 				val IR: self.type = self
 			}
       // Hack to get a pointer
-			codegen.emitSource(f, "F", new java.io.PrintWriter(new File("out.c")))
+			codegen.emitSource(f, "*F", new java.io.PrintWriter(new File("out.c")))
 		}
 	}
 }
